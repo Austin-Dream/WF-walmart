@@ -4,56 +4,42 @@ import io
 import base64
 from datetime import datetime
 
-st.set_page_config(page_title="沃尔玛批量填写追踪号（粘贴版）", page_icon="📋", layout="wide")
+st.set_page_config(page_title="沃尔玛批量上传单号生成器", page_icon="📦", layout="wide")
 
 def parse_pasted_data(pasted_text):
-    """将粘贴的文本解析为DataFrame，支持Tab、逗号、空格分隔"""
+    """将粘贴的文本解析为DataFrame（支持Tab、逗号、空格分隔）"""
     import re
     lines = pasted_text.strip().splitlines()
     if not lines:
         return None
-    # 判断分隔符：优先Tab，其次逗号，再空格
-    delimiter = None
+    # 优先尝试Tab分隔
     if '\t' in lines[0]:
-        delimiter = '\t'
+        sep = '\t'
     elif ',' in lines[0]:
-        delimiter = ','
+        sep = ','
     else:
-        # 尝试按空格分割（连续空格视为一个）
+        # 按空格分割（连续空格视为一个）
         rows = [re.split(r'\s+', line) for line in lines]
         max_cols = max(len(row) for row in rows)
-        # 填充不一致的行
         for row in rows:
             if len(row) < max_cols:
                 row.extend([''] * (max_cols - len(row)))
         return pd.DataFrame(rows)
-    # 使用pandas读取
     from io import StringIO
-    try:
-        df = pd.read_csv(StringIO(pasted_text), sep=delimiter, engine='python')
-        return df
-    except:
-        # 如果失败，手动分割
-        rows = [line.split(delimiter) for line in lines]
-        max_cols = max(len(row) for row in rows)
-        for row in rows:
-            if len(row) < max_cols:
-                row.extend([''] * (max_cols - len(row)))
-        return pd.DataFrame(rows)
+    df = pd.read_csv(StringIO(pasted_text), sep=sep, engine='python')
+    return df
 
-def generate_walmart_template(df, order_col, tracking_col, carrier_col):
-    """生成沃尔玛批量上传格式"""
+def generate_walmart_bulk(df, order_col, tracking_col):
+    """生成沃尔玛批量上传格式，承运商固定为 FedEx"""
     result = pd.DataFrame()
     result['Order ID'] = df[order_col].astype(str).str.strip()
     result['Tracking Number'] = df[tracking_col].astype(str).str.strip()
-    if carrier_col and carrier_col in df.columns:
-        result['Carrier Name'] = df[carrier_col].astype(str).str.strip()
-    else:
-        result['Carrier Name'] = ''
-    # 可选：添加当前日期作为发货日期（沃尔玛可能需要）
+    result['Carrier Name'] = 'FedEx'   # 固定承运商
     result['Ship Date'] = datetime.now().strftime('%Y-%m-%d')
-    # 删除全空的行
-    result = result.dropna(subset=['Order ID', 'Tracking Number'], how='all')
+    # 删除订单号或追踪号为空的记录
+    result = result.dropna(subset=['Order ID', 'Tracking Number'], how='any')
+    result = result[result['Order ID'] != '']
+    result = result[result['Tracking Number'] != '']
     return result
 
 def get_download_link(df, filename):
@@ -65,65 +51,57 @@ def get_download_link(df, filename):
     return href
 
 def main():
-    st.title("📋 沃尔玛批量填写追踪号（粘贴版）")
+    st.title("📦 沃尔玛批量上传单号生成器")
     st.markdown("""
     ### 使用说明
-    1. 从同事更新的Excel表格中**复制**数据（包括表头行，例如订单号、追踪号、承运商等列）
-    2. 在下方的文本框中**粘贴**（Ctrl+V 或 Cmd+V）
-    3. 程序自动解析表格，让您选择对应的列
-    4. 点击生成，即可下载**沃尔玛标准批量上传模板**（Excel格式）
+    1. 从同事更新后的Excel中**复制**所有数据（包括表头行）
+    2. 粘贴到下方文本框
+    3. 选择**订单号列**和**追踪号列**（同事填入的列，如 V 列）
+    4. 点击生成，下载沃尔玛标准批量上传文件
     
-    > ✅ 无需上传任何文件，数据仅在您浏览器中处理，安全便捷。
+    > ✅ 承运商自动设为 **FedEx**，发货日期为今天
     """)
     
-    # 粘贴区域
-    pasted_text = st.text_area("📌 请在此处粘贴数据（支持从Excel复制多行多列）", height=200,
-                               help="从Excel选中数据区域（包含表头），复制后粘贴到这里")
+    pasted = st.text_area("📋 请在此处粘贴数据（从Excel复制，含表头）", height=250)
     
-    if pasted_text:
-        # 解析粘贴内容
-        df = parse_pasted_data(pasted_text)
+    if pasted:
+        df = parse_pasted_data(pasted)
         if df is None or df.empty:
-            st.error("粘贴内容为空，请检查")
+            st.error("解析失败，请检查粘贴内容")
             return
         
         st.success(f"成功解析 {len(df)} 行 × {len(df.columns)} 列")
-        st.markdown("#### 解析后的数据预览（前10行）")
         st.dataframe(df.head(10))
         
-        # 列映射
-        st.markdown("### 列映射设置")
-        col_list = df.columns.tolist()
+        # 列选择
+        cols = df.columns.tolist()
+        # 智能推荐订单号列
+        default_order = 0
+        for i, c in enumerate(cols):
+            if str(c).lower() in ['po#', 'order#', 'order id', '订单号']:
+                default_order = i
+                break
+        order_col = st.selectbox("选择【订单号】列", cols, index=default_order)
         
-        order_col = st.selectbox("选择【订单号】列", col_list, index=find_column_index(col_list, ['order', 'po', 'order id', '订单号', '订单编号']))
-        tracking_col = st.selectbox("选择【追踪号】列", col_list, index=find_column_index(col_list, ['tracking', 'track', '追踪号', '单号', '快递单号']))
-        carrier_col = st.selectbox("选择【承运商】列（可选，没有则留空）", [''] + col_list, index=0)
+        # 智能推荐追踪号列（优先匹配 "Tracking Number" 或 "Update Tracking Number"）
+        default_track = 0
+        for i, c in enumerate(cols):
+            c_lower = str(c).lower()
+            if 'tracking' in c_lower or '单号' in c_lower:
+                default_track = i
+                break
+        tracking_col = st.selectbox("选择【追踪号】列（同事填写的列，如 V 列）", cols, index=default_track)
         
         if st.button("🚀 生成沃尔玛批量上传文件"):
-            if not order_col or not tracking_col:
-                st.error("请至少选择订单号和追踪号列")
+            result = generate_walmart_bulk(df, order_col, tracking_col)
+            if result.empty:
+                st.warning("没有有效的订单-追踪号记录，请检查列内容")
                 return
-            result_df = generate_walmart_template(df, order_col, tracking_col, carrier_col)
-            if result_df.empty:
-                st.warning("没有有效的订单数据，请检查列内容")
-                return
+            st.success(f"生成 {len(result)} 条记录")
+            st.dataframe(result)
             
-            st.success(f"成功生成 {len(result_df)} 条记录")
-            st.dataframe(result_df.head(20))
-            
-            # 下载
-            filename = f"walmart_bulk_tracking_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            st.markdown(get_download_link(result_df, filename), unsafe_allow_html=True)
-            st.info("下载后可直接在沃尔玛卖家中心上传（订单管理 → 批量上传追踪号）")
-
-def find_column_index(col_list, keywords):
-    """根据关键词找到第一个匹配的列索引"""
-    for i, col in enumerate(col_list):
-        col_lower = str(col).lower()
-        for kw in keywords:
-            if kw.lower() in col_lower:
-                return i
-    return 0
+            filename = f"walmart_bulk_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            st.markdown(get_download_link(result, filename), unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
